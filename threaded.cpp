@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <fstream>
 #include <string>
-#include "omp.h" //threading
+#include <omp.h> //threading
 #include <time.h> //timing
 #include <chrono>
 
@@ -21,7 +21,8 @@ using namespace std;
 //=============
 template<typename T> 
 ostream& operator <<(ostream& os, const vector<T>& a){
-	for(unsigned int i = 0; i < a.size() ; ++i){
+	unsigned int size = a.size();
+	for(unsigned int i = 0; i < size; ++i){
 		os << a[i] << "	";
 	}
 	return os;
@@ -31,7 +32,8 @@ ostream& operator <<(ostream& os, const vector<T>& a){
 //============
 template<typename T>
 vector<T> operator *(const double a, vector<T> b){
-	for(unsigned int i =0; i<b.size(); ++i){
+	unsigned int size = b.size();
+	for(unsigned int i =0; i<size; ++i){
 		b[i] = b[i]*a;
 	}
 	return b;
@@ -41,7 +43,8 @@ vector<T> operator *(const double a, vector<T> b){
 //============
 template<typename T>
 vector<T> operator +(const vector<T> a, vector<T> b){
-	for(unsigned int i = 0; i<b.size(); ++i){
+	unsigned int size = b.size();
+	for(unsigned int i = 0; i< size; ++i){
 		b[i] = b[i]+a[i];
 	}
 	return b;
@@ -229,10 +232,10 @@ vector<double> expRand(){
 //****************************************
 double calcDistance(double coord1, double coord2, double systemsize){
 	double distance = coord1 - coord2;
-	while(distance > systemsize/2){
+	while(distance > systemsize/2.){
 		distance = distance - systemsize;
 	}
-	while(distance < -systemsize/2){
+	while(distance < -systemsize/2.){
 		distance = distance + systemsize;
 	}
 	return distance;
@@ -661,6 +664,7 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 			int steps = (int)ceil(sim.getRcutofextra()/(timestep*5.*sim.calcAverageSpeed()));
 				if(steps > 500){
 					steps = 500;
+					cout << "very large friendsteps" << endl;
 				}
 			updatefriendsstep += steps;
 				
@@ -668,7 +672,7 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 		//******************************
 		//rescale velocities when we are in init phase
 		//***************************
-		if(currstep%scalesteps == 0 && currstep < initsteps){
+		if(currstep%scalesteps == 0 && currstep < initsteps-writersteps){
 			sim.multiplySpeeds(sim.calcLambda(temp));
 		}
 		//******************
@@ -724,8 +728,8 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 	//now every element gets an individual prefactor
 	//after this is done the elements in the vector are the actual correlation functions so we write them outan@Gertian-Pc:~/CourseNotes/Computationele/Code/MD/Data$ ffmpeg -framerate 25 -i Plot%04d.png -c:v libx264 -r 30 -pix_fmt bgr565 out.mp4
 
-
-	for(unsigned int i = 0; i<sim.getSubs(); ++i){
+	unsigned int subs = sim.getSubs();
+	for(unsigned int i = 0; i<subs; ++i){
 		prefactor = 1./(pow((i+1.)*sim.getSubslength(),2.)*sim.getSubslength());
 		corr << (i+1.)*sim.getSubslength() << "\t" <<summedbinned[i]*prefactor << endl; 
 	}
