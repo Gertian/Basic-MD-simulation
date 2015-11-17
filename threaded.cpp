@@ -254,6 +254,7 @@ class Simulation{
 	private:
 		double _time, _systemsize, _celsize;
 		double _density;
+		double _temp;
 		double _rcutof;
 		double _rcutofextra;
 		unsigned int _M;
@@ -267,6 +268,7 @@ class Simulation{
 		double getSystemsize()const{return _systemsize;}
 		double getCelsize()const{return _celsize;}
 		double getDensity()const{return _density;}
+		double getTemp()const{return _temp;}
 		double getRcutof()const{return _rcutof;}
 		double getRcutofextra()const{return _rcutofextra;}
 		unsigned int getM()const{return _M;}
@@ -346,7 +348,7 @@ class Simulation{
 		//	->initialize the first two particles  using the first 6 velocities
 		// 	->reapeat for the two resting particles 
 		//*****************************************************************************
-		Simulation(double density, unsigned int M, double rcutof, double rcutofextra, unsigned int subs){
+		Simulation(double density, double temp, unsigned int M, double rcutof, double rcutofextra, unsigned int subs){
 			_time = 0;
 			_systemsize = pow(4*M*M*M/density,1./3.);
 			_density = density;
@@ -357,6 +359,7 @@ class Simulation{
 			_subs = subs;
 			_subslength = _systemsize/subs;
 			_amountobjects = 4*M*M*M;
+			_temp = temp;
 			for(unsigned int i=0; i<_M; ++i){
 				for(unsigned int j=0; j<_M; ++j){
 					for(unsigned int k=0; k<_M; k++){
@@ -520,15 +523,50 @@ class Simulation{
 			output = output/2. + 8.*M_PI*(_amountobjects)*(_amountobjects)*(_amountobjects-1.)/(pow(_systemsize,3.))*(1./9.*pow(_rcutof,-9.)-1./3.*pow(_rcutof,-3.));
 			return output;	
 		}
+	
+	public:
+		//****************************************************************
+		//Calculate the pressure in the system
+		//****************************************************************	
+		double calcPressure(){
+			//we calculate P/density/k/T  = 1  -(aA+B)
+			//where a = 119.8/T / (3*amountparticles^2)
+			//	A = sum over i, j (6/r^6 - 12/r^12)/2 where j is in the friendlist of i.
+			// 	B = 2pi/3 * density * 119.8/T * systemsize^3 *(1/5 - 1/r^6)
+			double a = 119.8/(_temp*3.*_amountobjects*_amountobjects);
+			double B = 2.*M_PI/3. * _density * 119.8/_temp / (_systemsize*_systemsize*_systemsize) * (0.2 - pow(_rcutof,-6.));
+			double A = 0.;
+			#pragma omp parallel for
+			for(unsigned int i = 0; i < _amountobjects; ++i){
+				Object obji = _objects[i];
+				#pragma omp parallel for
+				for(unsigned int j = 0; j < obji.getAmountFriends(); ++j){
+					Object objj = obji.getFriendAt(j);
+					//calculate the distance bewteen obji and objj
+					double xtemp = calcDistance(obji.getPosition().getX(),objj.getPosition().getX(),_systemsize);
+					double ytemp = calcDistance(obji.getPosition().getY(),objj.getPosition().getY(),_systemsize);
+					double ztemp = calcDistance(obji.getPosition().getZ(),objj.getPosition().getZ(),_systemsize);
+					double distance = sqrt(xtemp*xtemp+ytemp*ytemp+ztemp*ztemp);
+					//calculate the contribution of this particle pair to the pressure
+					double contribution = 6*pow(distance,-6)-12*pow(distance,-12);
+					#pragma omp atomic
+					A += contribution;
+				}
+			}
+			return 1. - (a*A/2.+B); 
+			
+		}		
+
+
 	public:
 		//*****************************************************************
 		//This function will calculate a factor lambda(temp) so that lambda*v's behave according to the
 		//equipartition theorem at that temperature
 		//*****************************************************************
-		double calcLambda(double temp){
+		double calcLambda(){
 			//the used formula is basicly sqrt(total energy/kinetic energy) 
 			//the 119.8 is the depth of the lennard jones/boltzmann constant
-			return sqrt((1.5*(_amountobjects-1)*temp/119.8)/(calcKineticEnergy()));
+			return sqrt((1.5*(_amountobjects-1)*_temp/119.8)/(calcKineticEnergy()));
 		}
 
 	public:
@@ -598,7 +636,7 @@ ostream& operator <<(ostream& os,const Simulation& a){
 //************************************************
 //Function that makes a couple of verlet steps
 //***********************************************
-void simulate(Simulation& sim,double inittime,double time, double twriter, unsigned int scalesteps, double timestep, double temp){
+double simulate(Simulation& sim,double inittime,double time, double twriter, unsigned int scalesteps, double timestep, bool onlypressure){
 	//get the gpu and walltime
 	auto cpu0 = clock();
 	auto wall0 = chrono::system_clock::now();
@@ -607,11 +645,13 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 	ofstream velcorr("Data/velocitycorr.md");	
 	ofstream energy("Data/energy.md");	
 	ofstream corr("Data/correlation.md");
+	ofstream pres("Data/pressure.md");
+
 	//the timestep inputted by the user is only a suggestion (of the correct order) we make a better guess using the density and the temperature
 	//larger density --> smaller timestep, analog for temperature.
 	//density is a r^3 effeect so pow(-1/3) while temp is related to speed which is a v^2 <-> r^2 effect.
 	//taking these(rudementary) effects into consideration we get:
-	timestep = timestep*pow(sim.getDensity(),-1./3.)*pow(2*temp,-1./2.);
+	timestep = timestep*pow(sim.getDensity(),-1./3.)*pow(2*sim.getTemp(),-1./2.);
 	//using this timestepd we can calculate the amount of initsteps and simulatedsteps to be made
 	unsigned int initsteps =(int)ceil(inittime/timestep);
 	unsigned int simulatedsteps = (int)ceil(time/timestep);
@@ -621,16 +661,19 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 	cond << "#the amount of initialising time is: " << inittime << "*10^-4s"<< endl;
 	cond << "#the actual simulated time is: " << time << "*10^-14s" << endl;
 	cond << "#Every " << writersteps*timestep << "*10^-14s the data will be written away." << endl;
-	cond << "#The amount of datasets in the file is: " << simulatedsteps/writersteps << endl;
+	cond << "#The amount of datasets in the file is: " << simulatedsteps/writersteps  << endl;
 	cond << "#the systemsize is: " << sim.getSystemsize() << " in units of sigma" << endl;
-	cond << "#The temperature of the simulation was: " << temp << " K"  << endl;
+	cond << "#The temperature of the simulation was: " << sim.getTemp() << " K"  << endl;
 	cond << "#THe density of the simulation was: " << sim.getDensity() << " in units of sigma^-3"  << endl;
 	cond << "#There were " << sim.getAmountobjects() << " objects in the simulation" << endl;
-	
+
 	unsigned int currstep = 0;
 	//we hold a vector in which we store the summed binned distances of the system.
 	//in the end of the simulation this will give us <n(r)> which enables us to calculate the correlation function
 	vector<double> summedbinned(sim.getSubs(),0.);
+	//hold all the summed pressures for calculation of <P>
+	double pressure = 0;
+	//count the amount of contributions to the pressure and the summedbinned
 	unsigned int contributions = 0;
 	//we hold a flag wether the initialspeeds have already been stored. Also, we store v^2 ini
 	bool initialspeedsmade = false;
@@ -646,15 +689,6 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 	while(currstep <= simulatedsteps+initsteps){
 		cout << "Simulation progres: " << currstep <<"/"<<simulatedsteps+initsteps << '\r';
 		cout.flush();
-		//*************************
-		//Init initialspeeds if needed
-		//************************
-		if(!initialspeedsmade && currstep >= initsteps){
-			sim.set_Initialspeeds();
-			vsquaredini = sim.calcKineticEnergy()*2/sim.getAmountobjects();
-			initialspeedsmade = true;
-		}
-
 		//*******************
 		//Update the friend list. Note that this is always done for currstep == 0
 		//also, keep in mind that this is the only N^2 proces in the simulation. We try to avoid it as much as possible
@@ -662,18 +696,27 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 		if(currstep == updatefriendsstep){
 			sim.updateFriends();
 			int steps = (int)ceil(sim.getRcutofextra()/(timestep*5.*sim.calcAverageSpeed()));
-				if(steps > 500){
-					steps = 500;
-					cout << "very large friendsteps" << endl;
+				if(steps > 25){
+					steps = 25;
 				}
-			updatefriendsstep += steps;
+				updatefriendsstep += steps;
 				
 		}
+
 		//******************************
 		//rescale velocities when we are in init phase
 		//***************************
 		if(currstep%scalesteps == 0 && currstep < initsteps-writersteps){
-			sim.multiplySpeeds(sim.calcLambda(temp));
+			sim.multiplySpeeds(sim.calcLambda());
+		}
+
+		//*************************
+		//Init initialspeeds if needed
+		//************************
+		if(!initialspeedsmade && currstep >= initsteps-writersteps){
+			sim.set_Initialspeeds();
+			vsquaredini = sim.calcKineticEnergy()*2/sim.getAmountobjects();
+			initialspeedsmade = true;
 		}
 		//******************
 		//Print away the system if needed
@@ -681,28 +724,39 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 		//in theory this value might be off a tiny bit as it is still in the init phase, but the error will be neglectable
 		//*****************
 		if(currstep%writersteps == 0 && currstep >= initsteps-writersteps){
-			#pragma omp parallel num_threads(3)
-			{
-				if(omp_get_thread_num() == 0 ){
-					//note that we insert two endlines.This is because gnuplot than sees the 2 blocks as different datasets!
-					coordinates << sim << endl << endl;
+			if(!onlypressure){	
+				#pragma omp parallel num_threads(4)
+				{
+					if(omp_get_thread_num() == 0){
+						//note that we insert two endlines.This is because gnuplot than sees the 2 blocks as different datasets!
+						coordinates << sim << endl << endl;
+					}
+					if(omp_get_thread_num() == 1){	
+						
+						//we also want to output energy over time. This is done without the several blocks
+						double potential = sim.calcPotentialEnergy();
+						double kinetic = sim.calcKineticEnergy();
+						energy << sim.getTime()-inittime << '\t' << potential << '\t' << kinetic << '\t' << potential + kinetic << endl;
+					}
+					if(omp_get_thread_num() == 2){
+						//also we want to add this setup to the summedbinned vector
+						summedbinned = summedbinned + sim.binDistances();
+							
+						//write away the velocity autocorrelation, note the normalisation
+						velcorr << sim.getTime()-inittime << '\t' << sim.calcAutoCorrelation()/vsquaredini << endl;
+					}
+					if(omp_get_thread_num() == 3){
+						//calculate the pressure in the system
+						pres << sim.getTime()-inittime << '\t' << sim.calcPressure() << endl;
+					}
 				}
-				if(omp_get_thread_num() == 1){	
-					
-					//we also want to output energy over time. This is done without the several blocks
-					double potential = sim.calcPotentialEnergy();
-					double kinetic = sim.calcKineticEnergy();
-					energy << sim.getTime()-inittime << '\t' << potential << '\t' << kinetic << '\t' << potential + kinetic << endl;
-				}
-				if(omp_get_thread_num() == 2){
-					//also we want to add this setup to the summedbinned vector
-					summedbinned = summedbinned + sim.binDistances();
-					contributions ++;
-					//write away the velocity autocorrelation, note the normalisation
-					velcorr << sim.getTime()-inittime << '\t' << sim.calcAutoCorrelation()/vsquaredini << endl;
-				}
+				contributions ++;
+			}else{
+				pressure += sim.calcPressure();
+				contributions ++;
 			}
-		}	
+		}
+	
 		//********************
 		//Make the actual step
 		//********************
@@ -718,47 +772,67 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 		currstep++;
 		sim.shiftTime(timestep);
 	}
-	cout << endl << endl;
-	//calculate <n(r)>
-	summedbinned = (1./contributions)*summedbinned;
-	//now we need to loop over all the elements in the summedbinned vector and multiply them with the correct prefactor
-	//having done this we obtained the correclation function
-	double prefactor = 2.*pow(sim.getSystemsize(),3.)/(sim.getAmountobjects()*(sim.getAmountobjects()-1.)*4.*M_PI);
-	summedbinned = prefactor*summedbinned;
-	//now every element gets an individual prefactor
-	//after this is done the elements in the vector are the actual correlation functions so we write them outan@Gertian-Pc:~/CourseNotes/Computationele/Code/MD/Data$ ffmpeg -framerate 25 -i Plot%04d.png -c:v libx264 -r 30 -pix_fmt bgr565 out.mp4
 
-	unsigned int subs = sim.getSubs();
-	for(unsigned int i = 0; i<subs; ++i){
-		prefactor = 1./(pow((i+1.)*sim.getSubslength(),2.)*sim.getSubslength());
-		corr << (i+1.)*sim.getSubslength() << "\t" <<summedbinned[i]*prefactor << endl; 
+
+
+
+
+
+	if(!onlypressure){
+		cout << endl << endl;
+		//calculate <n(r)>
+		summedbinned = (1./contributions)*summedbinned;
+		//now we need to loop over all the elements in the summedbinned vector and multiply them with the correct prefactor
+		//having done this we obtained the correclation function
+		double prefactor = 2.*pow(sim.getSystemsize(),3.)/(sim.getAmountobjects()*(sim.getAmountobjects()-1.)*4.*M_PI);
+		summedbinned = prefactor*summedbinned;
+		//now every element gets an individual prefactor
+		//after this is done the elements in the vector are the actual correlation functions so we write them outan@Gertian-Pc:~/CourseNotes/Computationele/Code/MD/Data$ ffmpeg -framerate 25 -i Plot%04d.png -c:v libx264 -r 30 -pix_fmt bgr565 out.mp4
+	
+		unsigned int subs = sim.getSubs();
+		for(unsigned int i = 0; i<subs; ++i){
+			prefactor = 1./(pow((i+1.)*sim.getSubslength(),2.)*sim.getSubslength());
+			corr << (i+1.)*sim.getSubslength() << "\t" <<summedbinned[i]*prefactor << endl; 
+		}
 	}
+
 
 	auto cpu1 = clock();
 	auto wall1 = chrono::system_clock::now();
 
-	//NOW some rather ugly non windows compatible code.
-	//For non linux users, do the following, 
-	//1) run the code and see if it works, it might I don't know...
-	//2) if it does not work, comment this codeblock(all the system... commands) out and recompile
-	//3) Check in the map Data, there is a file 'conditions.md' in this file you will find the systemsize and the amount of datapoints made
-	//4) in the main directory, run gnuplot -e "sytemwidth=A; plots=B" Plots.gnu where A and B are the systemsize and the amount of datapoints
-	//5) Finally check in the map Data, the plotted data can be found there
-	cout.flush();
-	cout << "ploting all the generated data" << endl; 
-	cout << "-------------------------------------------------------------------" << endl;
-	string order = "gnuplot -e \"systemwidth="+to_string(sim.getSystemsize())+";plots="+to_string(simulatedsteps/writersteps-1.)+";highlight="+to_string(ceil(sim.getAmountobjects()/2.))+";tfinal="+to_string(time)+"\" Plots.gnu";
-	system(order.c_str());
-	cout << endl << endl;
-	cout << "Making a call to ffmpeg to make a movie out of the simulation" << endl;
-	cout << "-------------------------------------------------------------------" << endl;
-	system("ffmpeg -y -framerate 20 -i ./Data/Plot%04d.png -c:v libx264 -r 30 -pix_fmt bgr565 ./Data/out.mp4");
-	cout << endl << endl;
-	system("rm ./Data/Plot*.png");
-	cout << "done" << endl;
-	cout << "-------------------------------------------------------------------" << endl;
+	double output = -1;
+	if(!onlypressure){
+		//NOW some rather ugly non windows compatible code.
+		//For non linux users, do the following, 
+		//1) run the code and see if it works, it might I don't know...
+		//2) if it does not work, comment this codeblock(all the system... commands) out and recompile
+		//3) Check in the map Data, there is a file 'conditions.md' in this file you will find the systemsize and the amount of datapoints made
+		//4) in the main directory, run gnuplot -e "sytemwidth=A; plots=B" Plots.gnu where A and B are the systemsize and the amount of datapoints
+		//5) Finally check in the map Data, the plotted data can be found there
+		cout.flush();
+		cout << "ploting all the generated data" << endl; 
+		cout << "-------------------------------------------------------------------" << endl;
+		string order = "gnuplot -e \"systemwidth="+to_string(sim.getSystemsize())+";plots="+to_string(simulatedsteps/writersteps-1.)+";highlight="+to_string(ceil(sim.getAmountobjects()/2.))+";tfinal="+to_string(time)+"\" Plots.gnu";
+		system(order.c_str());
+		cout << endl << endl;
+		cout << "Making a call to ffmpeg to make a movie out of the simulation" << endl;
+		cout << "-------------------------------------------------------------------" << endl;
+		system("ffmpeg -y -framerate 20 -i ./Data/Plot%04d.png -c:v libx264 -r 30 -pix_fmt bgr565 ./Data/out.mp4");
+		cout << endl << endl;
+		system("rm ./Data/Plot*.png");
+	
+		cout << "done" << endl;
+		cout << "-------------------------------------------------------------------" << endl;
+	}
+	
 	cout << "used CPU  time is: " << (double)(cpu1 - cpu0)/CLOCKS_PER_SEC << "s" << endl;	
 	cout << "used wall time is: " << (double)(wall1 - wall0).count()*(1./1000000000.) << "s"  << endl;
+	
+	if(onlypressure){
+		//also code that will not work for windows users :/ (sorry guys)
+		output = pressure/contributions;	
+	}
+	return output;
 }
 
 //***********************************************
@@ -771,39 +845,62 @@ void simulate(Simulation& sim,double inittime,double time, double twriter, unsig
 //***********************************************
 //***********************************************
 int main(){
-	//make a simulation with 1 as density. THis means 1 particle per volume in units of potential length 
-	//3*3 = 9 boxes in the simulation and 3*sigma as the rcutof.
-	//Also, we will make 100 subdivisions for the calculation of the correlation length
-	cout << "Gathering input: " << endl;
-	cout << "-------------------------------------------------------------------" << endl;
-	double density;
-	cout << "Please enter the density to run the simulation at" << endl;
-	cin >> density;
+	cout << "Do you want to simulate an example or 'proof' the ideal gas law ? 0 or 1" << endl;
+	unsigned int prooflaw;
+	cin >> prooflaw;
+	cout.flush();
+	if(prooflaw == 0){
+		//make a simulation with 1 as density. THis means 1 particle per volume in units of potential length 
+		//3*3 = 9 boxes in the simulation and 3*sigma as the rcutof.
+		//Also, we will make 100 subdivisions for the calculation of the correlation length
+		
+		cout << "Gathering input: " << endl;
+		cout << "-------------------------------------------------------------------" << endl;
+		double density;
+		cout << "Please enter the density to run the simulation at" << endl;
+		cin >> density;
+		
+		int cubes;
+		cout << "How many fcc grids should there be contained in the simulation ?" << endl;
+		cin >> cubes;
+		
+		double inittime;
+		cout << "How long should the init run ? Keep in mind: Order(timestep = 0.004)" << endl;
+		cin >> inittime;
 	
-	int cubes;
-	cout << "How many equivalent systems do you want to include in the system ?" << endl;
-	cin >> cubes;
+		double time;
+		cout << "How long should the simulation run ? Keep in mind: Order(timestep = 0.004)" << endl;
+		cin >> time; 
+
+		double temp;
+		cout << "please enter the temperature to run the simulation at" << endl;
+		cin >> temp;
+		
+		double twriter;
+		cout << "please enter the time you want to have in between 'datapoints'" << endl;
+		cin >> twriter;
+		cout << endl;
+		cout << endl;
 	
-	double inittime;
-	cout << "How long should the init run ? Keep in mind: Order(timestep = 0.004)" << endl;
-	cin >> inittime;
-
-	double time;
-	cout << "How long should the simulation run ? Keep in mind: Order(timestep = 0.004)" << endl;
-	cin >> time; 
-
-	double temp;
-	cout << "please enter the temperature to run the simulation at" << endl;
-	cin >> temp;
-	
-	double twriter;
-	cout << "please enter the time you want to have in between 'datapoints'" << endl;
-	cin >> twriter;
-	cout << endl;
-	cout << endl;
-
-	Simulation a = Simulation(density,cubes,2.5,0.4,320);
-	simulate(a,inittime,time,twriter,5,0.001,temp);
-
+		Simulation a = Simulation(density, temp ,cubes,2.5,1.,320);
+		simulate(a,inittime,time,twriter,5,0.0005,false);
+	}else{
+		ofstream P("Data/Pover_rhokT_functionof_rho_T.md");
+		double cubes = 2;
+		double inittime = 0.1;
+		double time = 0.3;
+		double twriter = 0.001;
+		cout << "simulation P=rhokT until density = 2 and temp = 1000 with deltarho 0.2 and deltatemp = 50" << endl;
+		for(double density = 0.1; density <= 3; density = density+0.3){
+			for(double temp = 75; temp <= 1000; temp += 75 ){
+				cout << "------------------------------------------------------" << endl;
+				cout << "current density and temperature are: " << density << '\t' << temp << endl;
+				Simulation a = Simulation(density, temp, cubes, 2.5, 1., 320);
+				double pressure = simulate(a, inittime, time, twriter, 5, 0.0005,true);
+				P << pressure << '\t' << density << '\t' << temp << endl;
+				cout << "the pressure for this run was" << pressure << endl << endl;
+			}
+		}
+	}
 	return 0;
 }
