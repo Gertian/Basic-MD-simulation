@@ -687,9 +687,7 @@ double simulate(Simulation& sim,double inittime,double time, double twriter, uns
 	cout << "Making the actual simulation" << endl;
 	cout << "-------------------------------------------------------------------" << endl;
 	while(currstep <= simulatedsteps+initsteps){
-		cout << "Simulation progres: " << currstep <<"/"<<simulatedsteps+initsteps << '\r';
-		cout.flush();
-		//*******************
+				//*******************
 		//Update the friend list. Note that this is always done for currstep == 0
 		//also, keep in mind that this is the only N^2 proces in the simulation. We try to avoid it as much as possible
 		//******************
@@ -706,14 +704,14 @@ double simulate(Simulation& sim,double inittime,double time, double twriter, uns
 		//******************************
 		//rescale velocities when we are in init phase
 		//***************************
-		if(currstep%scalesteps == 0 && currstep < initsteps-writersteps){
+		if(currstep%scalesteps == 0 && currstep < initsteps){
 			sim.multiplySpeeds(sim.calcLambda());
 		}
 
 		//*************************
 		//Init initialspeeds if needed
 		//************************
-		if(!initialspeedsmade && currstep >= initsteps-writersteps){
+		if(!initialspeedsmade && currstep >= initsteps){
 			sim.set_Initialspeeds();
 			vsquaredini = sim.calcKineticEnergy()*2/sim.getAmountobjects();
 			initialspeedsmade = true;
@@ -723,13 +721,16 @@ double simulate(Simulation& sim,double inittime,double time, double twriter, uns
 		//we start writing away before initsteps has ended so when the plot starts at t=0 it will look nicer...
 		//in theory this value might be off a tiny bit as it is still in the init phase, but the error will be neglectable
 		//*****************
-		if(currstep%writersteps == 0 && currstep >= initsteps-writersteps){
+		if(currstep%writersteps == 0 && currstep >= initsteps){
 			if(!onlypressure){	
 				#pragma omp parallel num_threads(4)
 				{
 					if(omp_get_thread_num() == 0){
-						//note that we insert two endlines.This is because gnuplot than sees the 2 blocks as different datasets!
+						//note that we insert two endlines.This is because gnuplot than sees the 2 blocks as different datasets!						
 						coordinates << sim << endl << endl;
+						cout << "Simulation progres: " << currstep <<"/"<<simulatedsteps+initsteps << '\r';
+						cout.flush();
+
 					}
 					if(omp_get_thread_num() == 1){	
 						
@@ -829,8 +830,10 @@ double simulate(Simulation& sim,double inittime,double time, double twriter, uns
 	cout << "used wall time is: " << (double)(wall1 - wall0).count()*(1./1000000000.) << "s"  << endl;
 	
 	if(onlypressure){
-		//also code that will not work for windows users :/ (sorry guys)
 		output = pressure/contributions;	
+	}else{
+		//in case the user didn't need the very accurate pressure we still return a rough estimate
+		output = sim.calcPressure();
 	}
 	return output;
 }
@@ -883,7 +886,7 @@ int main(){
 		cout << endl;
 	
 		Simulation a = Simulation(density, temp ,cubes,2.5,1.,320);
-		simulate(a,inittime,time,twriter,5,0.0005,false);
+		cout << "the pressure in the simulation was" << simulate(a,inittime,time,twriter,5,0.0005,false) << endl;
 	}else{
 		ofstream P("Data/Pover_rhokT_functionof_rho_T.md");
 		double cubes = 2;
@@ -891,8 +894,8 @@ int main(){
 		double time = 0.3;
 		double twriter = 0.001;
 		cout << "simulation P=rhokT until density = 2 and temp = 1000 with deltarho 0.2 and deltatemp = 50" << endl;
-		for(double density = 0.1; density <= 3; density = density+0.3){
-			for(double temp = 75; temp <= 1000; temp += 75 ){
+		for(double density = 0.1; density <= 3.7; density = density+0.3){
+			for(double temp = 1575; temp <= 2100; temp += 75 ){
 				cout << "------------------------------------------------------" << endl;
 				cout << "current density and temperature are: " << density << '\t' << temp << endl;
 				Simulation a = Simulation(density, temp, cubes, 2.5, 1., 320);
